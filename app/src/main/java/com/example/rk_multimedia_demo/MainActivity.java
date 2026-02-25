@@ -75,7 +75,7 @@ public class MainActivity extends AppCompatActivity {
     private boolean isDecodeCompleted = false;
 
     // 核心变量
-    private String yuvOutputPath;       // YUV原始帧文件路径
+    private String yuvOutputPath;       // YUV原始帧文件路径（现在直接存储NV12格式）
     private FileOutputStream yuvFos;    // YUV文件输出流
     private MediaCodec h265Encoder;     // H265硬件编码器
     private MediaMuxer mediaMuxer;      // MP4封装器
@@ -142,7 +142,6 @@ public class MainActivity extends AppCompatActivity {
         donutChartCpu.setTransparentCircleRadius(55f);
         donutChartCpu.setDrawCenterText(true);
         donutChartCpu.setCenterText("0.0%");
-        // 核心修改：将中心文字大小从24f改为14f（可根据需求调整为16f/18f）
         donutChartCpu.setCenterTextSize(14f);
         Legend legend = donutChartCpu.getLegend();
         legend.setEnabled(false);
@@ -212,7 +211,6 @@ public class MainActivity extends AppCompatActivity {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
             hasWritePermission = ActivityCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED;
         } else {
-            // Android 11+ 需要 MANAGE_EXTERNAL_STORAGE 权限才能写入公共目录
             hasWritePermission = Environment.isExternalStorageManager();
         }
         Log.d(TAG, "📌 存储写入权限：" + hasWritePermission);
@@ -230,11 +228,9 @@ public class MainActivity extends AppCompatActivity {
                 .setPositiveButton("去授权", (dialog, which) -> {
                     dialog.dismiss();
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                        // Android 11+ 跳转到所有文件访问权限设置
                         Intent intent = new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION);
                         startActivityForResult(intent, REQUEST_MANAGE_EXTERNAL_STORAGE);
                     } else {
-                        // 低版本跳转到应用详情页
                         Intent intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
                         intent.setData(android.net.Uri.parse("package:" + getPackageName()));
                         startActivity(intent);
@@ -350,7 +346,7 @@ public class MainActivity extends AppCompatActivity {
             }).start();
         });
 
-        // 解码按钮（核心修改：支持颜色格式传递）
+        // 解码按钮（【优化修改】：解码阶段直接转换为NV12格式）
         btnHardwareDecode.setOnClickListener(v -> {
             if (!hasAllPermissions()) {
                 safeUpdateResult("❌ 请先点击【申请权限】按钮授予所有必要权限！");
@@ -378,21 +374,21 @@ public class MainActivity extends AppCompatActivity {
                 return;
             }
 
-            // 子线程解码半帧并写入YUV文件
+            // 子线程解码半帧并写入YUV文件（NV12格式）
             RKVideoScanner.VideoItem selectedVideo = videoList.get(selectedPos);
             new Thread(() -> {
                 isDecoding = true;
                 isDecodeCompleted = false;
-                safeUpdateResult("🔄 开始解码4K原始帧（仅半帧）：" + selectedVideo.displayName);
+                safeUpdateResult("🔄 开始解码4K原始帧（仅半帧）并转换为NV12：" + selectedVideo.displayName);
 
                 try {
-                    // 1. 创建YUV输出文件（YUV仍存私有目录，编码后删除）
-                    File yuvDir = new File(getExternalFilesDir("RK_YUV"), "raw");
+                    // 1. 创建YUV输出文件（存储NV12格式）
+                    File yuvDir = new File(getExternalFilesDir("RK_YUV"), "raw_nv12");
                     if (!yuvDir.exists()) yuvDir.mkdirs();
-                    yuvOutputPath = new File(yuvDir, "4k_raw_half_" + System.currentTimeMillis() + ".yuv").getAbsolutePath();
+                    yuvOutputPath = new File(yuvDir, "4k_raw_nv12_half_" + System.currentTimeMillis() + ".yuv").getAbsolutePath();
                     yuvFos = new FileOutputStream(yuvOutputPath, false); // 覆盖写入
 
-                    // 2. 解码4K原始帧（仅半帧）并写入文件（修改回调，接收颜色格式）
+                    // 2. 解码4K原始帧并转换为NV12后写入文件
                     String decodeResult = rawFrameDecoder.decode4KRawFrames(
                             MainActivity.this,
                             selectedVideo.path,
@@ -400,19 +396,30 @@ public class MainActivity extends AppCompatActivity {
                                 @Override
                                 public boolean onFrameReceived(byte[] yuvData, int width, int height, long pts, int colorFormat) {
                                     try {
-                                        // 将单帧YUV数据写入文件（追加）
-                                        yuvFos.write(yuvData);
+                                        byte[] nv12Data = yuvData;
+                                        // 【优化核心】解码出的是I420则直接转换为NV12
+                                        if (isI420Format(colorFormat)) {
+                                            nv12Data = YuvConverter.i420ToNv12(yuvData, width, height);
+                                            if (nv12Data == null) {
+                                                Log.e(TAG, "I420转NV12失败，跳过当前帧");
+                                                return false;
+                                            }
+                                            Log.d(TAG, "🔄 解码帧完成I420→NV12转换，原大小=" + yuvData.length + "，转换后=" + nv12Data.length);
+                                        }
+
+                                        // 写入NV12格式数据到文件
+                                        yuvFos.write(nv12Data);
                                         yuvFos.flush();
-                                        Log.d(TAG, "📝 写入YUV帧：格式=" + getColorFormatName(colorFormat)
-                                                + "，大小=" + yuvData.length + "字节，时间戳=" + pts + "μs");
+                                        Log.d(TAG, "📝 写入NV12帧：格式=" + getColorFormatName(MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar)
+                                                + "，大小=" + nv12Data.length + "字节，时间戳=" + pts + "μs");
                                     } catch (IOException e) {
-                                        Log.e(TAG, "写入YUV帧失败", e);
+                                        Log.e(TAG, "写入NV12帧失败", e);
                                         return false; // 停止解码
                                     }
                                     return true; // 继续解码下一帧
                                 }
                             },
-                            true // 关键：decodeHalf=true，只解码半帧
+                            true // 只解码半帧
                     );
 
                     // 3. 关闭YUV文件流
@@ -423,10 +430,10 @@ public class MainActivity extends AppCompatActivity {
 
                     isDecoding = false;
                     isDecodeCompleted = true;
-                    safeUpdateResult(decodeResult + "\n✅ 半帧YUV文件保存完成：" + yuvOutputPath);
+                    safeUpdateResult(decodeResult + "\n✅ 半帧NV12文件保存完成：" + yuvOutputPath);
 
                 } catch (Exception e) {
-                    Log.e(TAG, "解码并写入YUV失败", e);
+                    Log.e(TAG, "解码并转换NV12失败", e);
                     try {
                         if (yuvFos != null) yuvFos.close();
                     } catch (IOException ignored) {}
@@ -437,7 +444,7 @@ public class MainActivity extends AppCompatActivity {
             }).start();
         });
 
-        // 编码按钮
+        // 编码按钮（【优化修改】：无需再转换格式，直接使用NV12数据）
         btnHardwareEncode.setOnClickListener(v -> {
             if (!hasAllPermissions()) {
                 safeUpdateResult("❌ 请先点击【申请权限】按钮授予所有必要权限！");
@@ -445,7 +452,7 @@ public class MainActivity extends AppCompatActivity {
             }
 
             if (!isDecodeCompleted || yuvOutputPath == null || !new File(yuvOutputPath).exists()) {
-                safeUpdateResult("❌ 请先完成4K半帧解码并生成YUV文件！");
+                safeUpdateResult("❌ 请先完成4K半帧解码并生成NV12文件！");
                 return;
             }
 
@@ -461,14 +468,14 @@ public class MainActivity extends AppCompatActivity {
 
             new Thread(() -> {
                 isEncoding = true;
-                safeUpdateResult("🔄 开始编码H.265：读取半帧YUV文件 → " + yuvOutputPath);
+                safeUpdateResult("🔄 开始编码H.265：读取半帧NV12文件 → " + yuvOutputPath);
 
                 try {
                     // 1. 初始化H265编码器
                     int width = rawFrameDecoder.getVideoWidth();
                     int height = rawFrameDecoder.getVideoHeight();
                     int frameRate = rawFrameDecoder.getFrameRate();
-                    int frameSize = width * height * 3 / 2; // 单帧YUV大小
+                    int frameSize = width * height * 3 / 2; // NV12单帧大小
                     long totalHalfFrames = rawFrameDecoder.getDecodedHalfFrameCount(); // 获取半帧数量
 
                     boolean initSuccess = initH265Encoder(width, height, frameRate);
@@ -477,38 +484,38 @@ public class MainActivity extends AppCompatActivity {
                         return;
                     }
 
-                    // 2. 读取YUV文件并逐帧编码
+                    // 2. 读取NV12文件并逐帧编码（无需格式转换）
                     FileInputStream yuvFis = new FileInputStream(yuvOutputPath);
-                    byte[] frameBuffer = new byte[frameSize]; // 单帧缓冲区
+                    byte[] frameBuffer = new byte[frameSize]; // NV12单帧缓冲区
                     int readLen;
                     encodePts = 0;
                     long encodedFrameCount = 0;
 
                     while ((readLen = yuvFis.read(frameBuffer)) != -1 && encodedFrameCount < totalHalfFrames) {
                         if (readLen != frameSize) {
-                            Log.w(TAG, "读取YUV帧不完整：实际=" + readLen + "，期望=" + frameSize);
+                            Log.w(TAG, "读取NV12帧不完整：实际=" + readLen + "，期望=" + frameSize);
                             continue;
                         }
 
-                        // 编码单帧YUV数据（核心修改：支持格式转换）
-                        encodeSingleYuvFrame(frameBuffer, width, height);
+                        // 直接编码NV12帧（无需转换）
+                        encodeSingleNv12Frame(frameBuffer, width, height);
                         encodedFrameCount++;
                         encodePts++;
                     }
 
-                    // 3. 关闭YUV输入流
+                    // 3. 关闭NV12输入流
                     yuvFis.close();
 
                     // 4. 完成编码并封装MP4
                     finishEncode();
 
-                    // 5. 删除YUV文件
+                    // 5. 删除NV12文件
                     boolean deleteSuccess = deleteYuvFile();
-                    String tempYuvPath = yuvOutputPath; // 临时保存路径避免null
+                    String tempYuvPath = yuvOutputPath;
                     if (deleteSuccess) {
-                        safeUpdateResult("✅ 已删除原始YUV文件：" + tempYuvPath);
+                        safeUpdateResult("✅ 已删除原始NV12文件：" + tempYuvPath);
                     } else {
-                        safeUpdateResult("⚠️ YUV文件删除失败，请手动清理：" + tempYuvPath);
+                        safeUpdateResult("⚠️ NV12文件删除失败，请手动清理：" + tempYuvPath);
                     }
 
                     isEncoding = false;
@@ -527,16 +534,16 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
-    // 删除YUV文件（修复日志null问题）
+    // 删除YUV/NV12文件
     private boolean deleteYuvFile() {
         if (yuvOutputPath == null) return false;
         File yuvFile = new File(yuvOutputPath);
-        String tempPath = yuvOutputPath; // 临时保存路径
+        String tempPath = yuvOutputPath;
         if (yuvFile.exists()) {
             boolean deleted = yuvFile.delete();
-            Log.d(TAG, "🗑️ YUV文件删除：" + (deleted ? "成功" : "失败") + "，路径：" + tempPath);
+            Log.d(TAG, "🗑️ NV12文件删除：" + (deleted ? "成功" : "失败") + "，路径：" + tempPath);
             if (deleted) {
-                yuvOutputPath = null; // 清空路径
+                yuvOutputPath = null;
             }
             return deleted;
         }
@@ -546,17 +553,14 @@ public class MainActivity extends AppCompatActivity {
     // 初始化H265编码器（保存到公共目录）
     private boolean initH265Encoder(int width, int height, int frameRate) {
         try {
-            // 1. 创建H265输出文件（保存到系统公共视频目录）
+            // 1. 创建H265输出文件
             File publicVideoDir;
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                // Android 10+ 分区存储：公共视频目录
                 publicVideoDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES);
             } else {
-                // 低版本：直接使用公共目录
                 publicVideoDir = new File(Environment.getExternalStorageDirectory(), "Movies");
             }
 
-            // 创建自定义子目录
             File h265Dir = new File(publicVideoDir, "RK_H265/encoded");
             if (!h265Dir.exists()) {
                 boolean isCreated = h265Dir.mkdirs();
@@ -566,7 +570,6 @@ public class MainActivity extends AppCompatActivity {
                 }
             }
 
-            // 生成输出文件路径
             h265OutputPath = new File(h265Dir, "4k_h265_half_" + System.currentTimeMillis() + ".mp4").getAbsolutePath();
             Log.d(TAG, "📁 H265输出路径（公共目录）：" + h265OutputPath);
 
@@ -575,7 +578,6 @@ public class MainActivity extends AppCompatActivity {
             encodeFormat.setInteger(MediaFormat.KEY_BIT_RATE, 8 * 1024 * 1024); // 8Mbps码率
             encodeFormat.setInteger(MediaFormat.KEY_FRAME_RATE, frameRate);      // 帧率
             encodeFormat.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 10);       // I帧间隔
-            // 【关键】适配RK平台NV12格式
             encodeFormat.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar);
 
             // 3. 查找RK平台H265硬件编码器
@@ -611,31 +613,19 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    // 编码单帧YUV数据为H265（核心修改：增加I420转NV12）
-    private void encodeSingleYuvFrame(byte[] yuvData, int width, int height) {
+    // 【优化新增】直接编码NV12格式帧（移除格式转换逻辑）
+    private void encodeSingleNv12Frame(byte[] nv12Data, int width, int height) {
         try {
-            // 关键：根据解码格式转换为编码器需要的NV12
-            byte[] encodeData = yuvData;
-            int decodeFormat = rawFrameDecoder.getOutputColorFormat();
-            if (isI420Format(decodeFormat)) {
-                encodeData = YuvConverter.i420ToNv12(yuvData, width, height);
-                if (encodeData == null) {
-                    Log.e(TAG, "I420转NV12失败，跳过当前帧");
-                    return;
-                }
-                Log.d(TAG, "🔄 完成I420转NV12，帧大小：" + encodeData.length);
-            }
-
             // 1. 获取编码器输入缓冲区
             int inputBufferId = h265Encoder.dequeueInputBuffer(1000);
             if (inputBufferId >= 0) {
                 ByteBuffer inputBuffer = h265Encoder.getInputBuffer(inputBufferId);
                 if (inputBuffer != null) {
                     inputBuffer.clear();
-                    inputBuffer.put(encodeData); // 写入转换后的YUV数据
+                    inputBuffer.put(nv12Data); // 直接写入NV12数据
                     // 计算时间戳（微秒）
                     long pts = encodePts * (1000000 / rawFrameDecoder.getFrameRate());
-                    h265Encoder.queueInputBuffer(inputBufferId, 0, encodeData.length, pts, 0);
+                    h265Encoder.queueInputBuffer(inputBufferId, 0, nv12Data.length, pts, 0);
                 }
             }
 
@@ -667,7 +657,7 @@ public class MainActivity extends AppCompatActivity {
                 outputBufferId = h265Encoder.dequeueOutputBuffer(bufferInfo, 0);
             }
         } catch (Exception e) {
-            Log.e(TAG, "单帧编码失败", e);
+            Log.e(TAG, "NV12帧编码失败", e);
         }
     }
 
@@ -709,15 +699,14 @@ public class MainActivity extends AppCompatActivity {
             // 3. 停止并释放封装器和编码器
             releaseEncoder();
 
-            // 强制通知系统扫描文件（确保系统识别）
+            // 强制通知系统扫描文件
             if (h265OutputPath != null && new File(h265OutputPath).exists()) {
                 MediaScannerConnection.scanFile(
                         this,
                         new String[]{h265OutputPath},
-                        new String[]{"video/mp4"}, // 明确指定文件类型
+                        new String[]{"video/mp4"},
                         (path, uri) -> {
                             Log.d(TAG, "✅ H265文件已被系统媒体库识别，URI：" + uri);
-                            // 扫描完成后刷新视频列表
                             mainHandler.post(() -> {
                                 btnScanVideos.performClick(); // 自动触发扫描
                             });
@@ -761,15 +750,12 @@ public class MainActivity extends AppCompatActivity {
         int codecCount = MediaCodecList.getCodecCount();
         for (int i = 0; i < codecCount; i++) {
             MediaCodecInfo info = MediaCodecList.getCodecInfoAt(i);
-            // 过滤软件编码器
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && info.isSoftwareOnly()) {
                 continue;
             }
-            // 区分编码器/解码器
             if (info.isEncoder() != isEncoder) {
                 continue;
             }
-            // 检查格式支持且包含RK标识
             for (String type : info.getSupportedTypes()) {
                 if (type.equalsIgnoreCase(mime) && info.getName().contains("rk")) {
                     return info;
@@ -855,19 +841,16 @@ public class MainActivity extends AppCompatActivity {
         if (cpuUpdateTimer != null) {
             cpuUpdateTimer.cancel();
         }
-        // 释放编码器资源
         releaseEncoder();
-        // 关闭YUV文件流
         try {
             if (yuvFos != null) yuvFos.close();
         } catch (IOException ignored) {}
-        // 重置状态
         isDecoding = false;
         isDecodeCompleted = false;
         yuvOutputPath = null;
     }
 
-    // YUV420P转RGB（可选参考）
+    // YUV420P转RGB（可选参考，未修改）
     private byte[] convertYuv420ToRgb(byte[] yuvData, int width, int height) {
         int frameSize = width * height;
         byte[] rgbData = new byte[frameSize * 3];

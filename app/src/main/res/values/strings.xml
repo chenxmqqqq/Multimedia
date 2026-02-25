@@ -1,0 +1,9 @@
+<resources>
+    <string name="app_name">RK_Multimedia_Demo</string>
+    <string name="title">RK Android 14 视频扫描检测</string>
+    <string name="btn_permission">申请权限</string>
+    <string name="btn_scan">扫描视频</string>
+    <string name="btn_detect">检测格式</string>
+    <string name="result_hint">操作结果将显示在这里...</string>
+    <string name="spinner_prompt_video_index">选择视频序号</string>
+</resources>

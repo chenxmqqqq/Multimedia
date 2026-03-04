@@ -85,7 +85,7 @@ public class RK4KRawFrameDecoder {
             mTotalFrameCount = videoDurationUs / mFrameDurationUs;
             if (decodeHalf) {
                 targetFrameCount = mTotalFrameCount / 2;
-                result.append("✅ 视频总帧数：").append(mTotalFrameCount).append("，本次解码：").append(targetFrameCount).append("帧（半帧）\n");
+                result.append("✅ 视频总帧数：").append(mTotalFrameCount).append("，本次解码：").append(targetFrameCount).append("一半时长\n");
             } else {
                 targetFrameCount = mTotalFrameCount;
                 result.append("✅ 视频总帧数：").append(mTotalFrameCount).append("，本次解码全部帧\n");
@@ -107,20 +107,29 @@ public class RK4KRawFrameDecoder {
             result.append("✅ 使用 RK 4K 解码器：").append(decoderInfo.getName()).append("\n");
 
             decoder = MediaCodec.createByCodecName(decoderInfo.getName());
-            videoFormat.setInteger(MediaFormat.KEY_OPERATING_RATE, mFrameRate);
+            videoFormat.setInteger(MediaFormat.KEY_COLOR_FORMAT,
+                    MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar);
             videoFormat.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 8 * 1024 * 1024);
             decoder.configure(videoFormat, null, null, 0);
             decoder.start();
 
             // 新增：获取解码器输出的颜色格式（关键）
-            MediaCodecInfo.CodecCapabilities capabilities = decoder.getCodecInfo().getCapabilitiesForType(videoMime);
+            MediaCodecInfo.CodecCapabilities capabilities =
+                    decoder.getCodecInfo().getCapabilitiesForType(videoMime);
+
+            int preferredFormat = -1;
+
             for (int format : capabilities.colorFormats) {
-                if (format == MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Planar
-                        || format == MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar) {
-                    mOutputColorFormat = format;
-                    result.append("✅ 解码器输出YUV格式：").append(getColorFormatName(format)).append("\n");
+                if (format == MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar) {
+                    preferredFormat = format; // 优先选 NV12
                     break;
+                } else if (format == MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Planar) {
+                    preferredFormat = format; // 次选 I420
                 }
+            }
+
+            if (preferredFormat != -1) {
+                mOutputColorFormat = preferredFormat;
             }
 
             MediaCodec.BufferInfo bufferInfo = new MediaCodec.BufferInfo();
@@ -128,7 +137,7 @@ public class RK4KRawFrameDecoder {
 
             while (!isEOS) {
                 if (decodeHalf && decodedFrameCount >= targetFrameCount) {
-                    result.append("✅ 已解码 ").append(decodedFrameCount).append(" 帧（达到半帧目标），停止解码\n");
+                    result.append("✅ 已解码 ").append(decodedFrameCount).append(" （内存限制只解码一半时长），停止解码\n");
                     mDecodedHalfFrameCount = decodedFrameCount;
                     isEOS = true;
                     break;
@@ -165,7 +174,6 @@ public class RK4KRawFrameDecoder {
 
                     ByteBuffer outputBuffer = decoder.getOutputBuffer(outputBufferId);
                     if (outputBuffer != null && bufferInfo.size > 0) {
-                        // 修复：移除Math.min，确保完整拷贝（关键）
                         if (bufferInfo.size == mYuvFrameSize) {
                             outputBuffer.get(mSingle4KFrameBuffer, 0, bufferInfo.size);
                         } else {
@@ -232,7 +240,6 @@ public class RK4KRawFrameDecoder {
         return result.toString();
     }
 
-    // 辅助方法：格式化颜色格式名称
     private String getColorFormatName(int format) {
         switch (format) {
             case MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Planar:

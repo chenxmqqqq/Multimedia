@@ -394,32 +394,32 @@ public class MainActivity extends AppCompatActivity {
                             selectedVideo.path,
                             new RK4KRawFrameDecoder.OnYuvFrameCallback() {
                                 @Override
-                                public boolean onFrameReceived(byte[] yuvData, int width, int height, long pts, int colorFormat) {
+                                public boolean onFrameReceived(byte[] yuvData, int width, int height,
+                                                               long pts, int colorFormat) {
                                     try {
-                                        byte[] nv12Data = yuvData;
-                                        // 【优化核心】解码出的是I420则直接转换为NV12
-                                        if (isI420Format(colorFormat)) {
-                                            nv12Data = YuvConverter.i420ToNv12(yuvData, width, height);
-                                            if (nv12Data == null) {
-                                                Log.e(TAG, "I420转NV12失败，跳过当前帧");
+                                        byte[] dataToWrite = yuvData;
+
+                                        // ✅ 优化：只有非 NV12 时才转换
+                                        if (colorFormat != MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar) {
+                                            if (isI420Format(colorFormat)) {
+                                                dataToWrite = YuvConverter.i420ToNv12(yuvData, width, height);
+                                                Log.d(TAG, "🔄 解码器输出 I420，已转换为 NV12");
+                                            } else {
+                                                Log.e(TAG, "❌ 不支持的格式: " + colorFormat);
                                                 return false;
                                             }
-                                            Log.d(TAG, "🔄 解码帧完成I420→NV12转换，原大小=" + yuvData.length + "，转换后=" + nv12Data.length);
+                                        } else {
+                                            Log.d(TAG, "✅ 解码器直接输出 NV12，无需转换");
                                         }
 
-                                        // 写入NV12格式数据到文件
-                                        yuvFos.write(nv12Data);
-                                        yuvFos.flush();
-                                        Log.d(TAG, "📝 写入NV12帧：格式=" + getColorFormatName(MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar)
-                                                + "，大小=" + nv12Data.length + "字节，时间戳=" + pts + "μs");
+                                        yuvFos.write(dataToWrite);
                                     } catch (IOException e) {
-                                        Log.e(TAG, "写入NV12帧失败", e);
-                                        return false; // 停止解码
+                                        return false;
                                     }
-                                    return true; // 继续解码下一帧
+                                    return true;
                                 }
                             },
-                            true // 只解码半帧
+                            true
                     );
 
                     // 3. 关闭YUV文件流
@@ -848,32 +848,5 @@ public class MainActivity extends AppCompatActivity {
         isDecoding = false;
         isDecodeCompleted = false;
         yuvOutputPath = null;
-    }
-
-    // YUV420P转RGB（可选参考，未修改）
-    private byte[] convertYuv420ToRgb(byte[] yuvData, int width, int height) {
-        int frameSize = width * height;
-        byte[] rgbData = new byte[frameSize * 3];
-        int y, u, v;
-        for (int i = 0; i < height; i++) {
-            for (int j = 0; j < width; j++) {
-                y = yuvData[i * width + j] & 0xff;
-                u = yuvData[frameSize + (i / 2) * width + (j / 2) * 2] & 0xff;
-                v = yuvData[frameSize + (i / 2) * width + (j / 2) * 2 + 1] & 0xff;
-
-                int r = (int) (y + 1.402 * (v - 128));
-                int g = (int) (y - 0.34414 * (u - 128) - 0.71414 * (v - 128));
-                int b = (int) (y + 1.772 * (u - 128));
-
-                r = Math.max(0, Math.min(255, r));
-                g = Math.max(0, Math.min(255, g));
-                b = Math.max(0, Math.min(255, b));
-
-                rgbData[(i * width + j) * 3] = (byte) r;
-                rgbData[(i * width + j) * 3 + 1] = (byte) g;
-                rgbData[(i * width + j) * 3 + 2] = (byte) b;
-            }
-        }
-        return rgbData;
     }
 }
